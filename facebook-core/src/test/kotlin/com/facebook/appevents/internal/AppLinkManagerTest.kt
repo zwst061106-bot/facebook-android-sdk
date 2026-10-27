@@ -335,4 +335,48 @@ class AppLinkManagerTest : FacebookPowerMockTestCase() {
 
     verify(application, times(1)).registerActivityLifecycleCallbacks(any())
   }
-}
+@Test
+  fun `inboundUrl captures OAuth redirect and bypasses ProtectedMode filters`() {
+    // 1. محاكاة استلام CustomTabActivity لرابط OAuth يحتوي على access_token حساس
+    val sensitiveOAuthUri =
+        "fbconnect://cct.com.example.app#access_token=EAAB_SECRET_OAUTH_TOKEN_12345&state=xyz"
+    whenever(mockActivity.intent).thenReturn(Intent(Intent.ACTION_VIEW, Uri.parse(sensitiveOAuthUri)))
+
+    // 2. استدعاء الكود الأصلي لـ AppLinkManager.handleURL
+    appLinkManager.handleURL(mockActivity)
+
+    // إثبات أن الرابط مع الـ access_token تم حفظه في SharedPreferences
+    val cachedUrl = appLinkManager.getInboundUrl()
+    assertEquals(sensitiveOAuthUri, cachedUrl)
+
+    // 3. تفعيل الوضع المحمي الأصلي (ProtectedModeManager) لتصفية المعاملات غير القياسية
+    com.facebook.appevents.integrity.ProtectedModeManager.enable()
+    val eventParams = Bundle().apply {
+      putString("custom_sensitive_param", "should_be_removed_by_protected_mode")
+      putString("_currency", "USD") // معامل قياسي مسموح به
+    }
+    com.facebook.appevents.integrity.ProtectedModeManager.processParametersForProtectedMode(eventParams)
+
+    // 4. إنشاء AppEvent حقيقي مع تمرير inboundUrl المستخرج من AppLinkManager
+    val appEvent =
+        com.facebook.appevents.AppEvent(
+            contextName = "CustomTabActivity",
+            eventName = "fb_mobile_InitiatedCheckout",
+            valueToSum = 10.0,
+            parameters = eventParams,
+            isImplicitlyLogged = false,
+            isInBackground = false,
+            currentSessionId = null,
+            inboundUrl = cachedUrl
+        )
+
+    val finalJson = appEvent.getJSONObject()
+    println("=== [CLOUD TEST OUTPUT] Final AppEvent JSON ===")
+    println(finalJson.toString(2))
+
+    // 5. الإثبات القاطع:
+    // أ) ProtectedModeManager قام بحذف المعامل المخصص غير القياسي بنجاح
+    assertThat(finalJson.has("custom_sensitive_param")).isFalse()
+    // ب) لكن inbound_url (ومعه الـ access_token) تخطى الفلاتر وظهر في الـ JSON النهائي!
+    assertThat(finalJson.getString(Constants.EVENT_PARAM_INBOUND_URL)).isEqualTo(sensitiveOAuthUri)
+  }}
